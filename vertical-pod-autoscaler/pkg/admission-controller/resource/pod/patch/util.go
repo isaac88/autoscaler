@@ -51,6 +51,17 @@ func GetAddResourceRequirementValuePatch(i int, kind string, resource core.Resou
 		Value: quantity.String()}
 }
 
+// MM custom code
+// GetAddInitContainerResourceRequirementValuePatch returns a patch record to add resource requirements to an init container.
+func GetAddInitContainerResourceRequirementValuePatch(i int, kind string, resource core.ResourceName, quantity resource.Quantity) resource_admission.PatchRecord {
+	return resource_admission.PatchRecord{
+		Op:    "add",
+		Path:  fmt.Sprintf("/spec/initContainers/%d/resources/%s/%s", i, kind, resource),
+		Value: quantity.String()}
+}
+
+// MM End custom code
+
 // GetPatchInitializingEmptyResources returns a patch record to initialize an empty resources object for a container.
 func GetPatchInitializingEmptyResources(i int) resource_admission.PatchRecord {
 	return resource_admission.PatchRecord{
@@ -59,6 +70,18 @@ func GetPatchInitializingEmptyResources(i int) resource_admission.PatchRecord {
 		Value: core.ResourceRequirements{},
 	}
 }
+
+// MM custom code
+// GetPatchInitializingEmptyInitContainerResources returns a patch record to initialize an empty resources object for an init container.
+func GetPatchInitializingEmptyInitContainerResources(i int) resource_admission.PatchRecord {
+	return resource_admission.PatchRecord{
+		Op:    "add",
+		Path:  fmt.Sprintf("/spec/initContainers/%d/resources", i),
+		Value: core.ResourceRequirements{},
+	}
+}
+
+// MM End custom code
 
 // GetPatchInitializingEmptyResourcesSubfield returns a patch record to initialize an empty subfield
 // (e.g., "requests" or "limits") within a container's resources object.
@@ -69,3 +92,16 @@ func GetPatchInitializingEmptyResourcesSubfield(i int, kind string) resource_adm
 		Value: core.ResourceList{},
 	}
 }
+
+// MM custom code
+// GetPatchInitializingEmptyInitContainerResourcesSubfield returns a patch record to initialize an empty subfield
+// (e.g., "requests" or "limits") within an init container's resources object.
+func GetPatchInitializingEmptyInitContainerResourcesSubfield(i int, kind string) resource_admission.PatchRecord {
+	return resource_admission.PatchRecord{
+		Op:    "add",
+		Path:  fmt.Sprintf("/spec/initContainers/%d/resources/%s", i, kind),
+		Value: core.ResourceList{},
+	}
+}
+
+// MM End custom code

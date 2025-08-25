@@ -82,7 +82,7 @@ func (c *cappingRecommendationProcessor) Apply(
 	if err != nil {
 		return nil, nil, err
 	}
-	for _, containerRecommendation := range limitAdjustedRecommendation {
+	for i, containerRecommendation := range limitAdjustedRecommendation {
 		container := getContainer(containerRecommendation.ContainerName, pod)
 
 		if container == nil {
@@ -95,7 +95,7 @@ func (c *cappingRecommendationProcessor) Apply(
 			klog.V(0).InfoS("Failed to fetch LimitRange for namespace", "namespace", pod.Namespace)
 		}
 		updatedContainerResources, containerAnnotations, err := getCappedRecommendationForContainer(
-			pod, *container, &containerRecommendation, policy, containerLimitRange)
+			pod, *container, &limitAdjustedRecommendation[i], policy, containerLimitRange)
 
 		if len(containerAnnotations) != 0 {
 			containerToAnnotationsMap[containerRecommendation.ContainerName] = containerAnnotations
@@ -274,10 +274,10 @@ func ApplyVPAPolicy(podRecommendation *vpa_types.RecommendedPodResources,
 	}
 
 	updatedRecommendations := []vpa_types.RecommendedContainerResources{}
-	for _, containerRecommendation := range podRecommendation.ContainerRecommendations {
+	for i, containerRecommendation := range podRecommendation.ContainerRecommendations {
 		containerName := containerRecommendation.ContainerName
 		updatedContainerResources, err := applyVPAPolicyForContainer(containerName,
-			&containerRecommendation, policy, globalMaxAllowed)
+			&podRecommendation.ContainerRecommendations[i], policy, globalMaxAllowed)
 		if err != nil {
 			return nil, fmt.Errorf("cannot apply policy on recommendation for container name %v", containerName)
 		}
@@ -287,9 +287,9 @@ func ApplyVPAPolicy(podRecommendation *vpa_types.RecommendedPodResources,
 }
 
 func getRecommendationForContainer(containerName string, resources []vpa_types.RecommendedContainerResources) *vpa_types.RecommendedContainerResources {
-	for _, containerRec := range resources {
+	for i, containerRec := range resources {
 		if containerRec.ContainerName == containerName {
-			return &containerRec
+			return &resources[i]
 		}
 	}
 	return nil
@@ -307,12 +307,25 @@ func GetRecommendationForContainer(containerName string, recommendation *vpa_typ
 }
 
 func getContainer(containerName string, pod *apiv1.Pod) *apiv1.Container {
+	// MM custom code
+	// First, search in regular containers
 	for i, container := range pod.Spec.Containers {
 		if container.Name == containerName {
 			return &pod.Spec.Containers[i]
 		}
 	}
+
+	// If not found and the container name is "istio-proxy", search in init containers
+	if containerName == "istio-proxy" {
+		for i, container := range pod.Spec.InitContainers {
+			if container.Name == containerName {
+				return &pod.Spec.InitContainers[i]
+			}
+		}
+	}
+
 	return nil
+	// MM End custom code
 }
 
 // applyContainerLimitRange updates recommendation if recommended resources are outside of limits defined in VPA resources policy
@@ -393,10 +406,25 @@ type containerWithRecommendation struct {
 
 func zipContainersWithRecommendations(resources []vpa_types.RecommendedContainerResources, pod *apiv1.Pod) []containerWithRecommendation {
 	result := make([]containerWithRecommendation, 0)
-	for _, container := range pod.Spec.Containers {
+
+	// Add regular containers
+	for i, container := range pod.Spec.Containers {
 		recommendation := getRecommendationForContainer(container.Name, resources)
-		result = append(result, containerWithRecommendation{container: &container, recommendation: recommendation})
+		result = append(result, containerWithRecommendation{container: &pod.Spec.Containers[i], recommendation: recommendation})
 	}
+
+	// MM custom code
+	// Add istio-proxy init container if it exists and has recommendations
+	for i, container := range pod.Spec.InitContainers {
+		if container.Name == "istio-proxy" {
+			recommendation := getRecommendationForContainer(container.Name, resources)
+			if recommendation != nil {
+				result = append(result, containerWithRecommendation{container: &pod.Spec.InitContainers[i], recommendation: recommendation})
+			}
+		}
+	}
+	// MM End custom code
+
 	return result
 }
 
@@ -495,6 +523,8 @@ func insertRequestsForMissingRecommendations(containerRecommendations []vpa_type
 	for _, r := range containerRecommendations {
 		result = append(result, *r.DeepCopy())
 	}
+
+	// Add missing recommendations for regular containers
 	for _, container := range pod.Spec.Containers {
 		if recommendationForContainerExists(container.Name, containerRecommendations) {
 			continue
@@ -508,6 +538,22 @@ func insertRequestsForMissingRecommendations(containerRecommendations []vpa_type
 			Target:        requests,
 		})
 	}
+
+	// MM custom code
+	// Add missing recommendations for istio-proxy init container
+	for _, container := range pod.Spec.InitContainers {
+		if container.Name == "istio-proxy" && !recommendationForContainerExists(container.Name, containerRecommendations) {
+			requests, _ := resourcehelpers.ContainerRequestsAndLimits(container.Name, pod)
+			if len(requests) > 0 {
+				result = append(result, vpa_types.RecommendedContainerResources{
+					ContainerName: container.Name,
+					Target:        requests,
+				})
+			}
+		}
+	}
+	// MM End custom code
+
 	return result
 }
 

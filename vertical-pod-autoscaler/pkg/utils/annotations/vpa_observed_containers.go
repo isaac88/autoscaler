@@ -32,10 +32,22 @@ const (
 
 // GetVpaObservedContainersValue creates an annotation value for a given pod.
 func GetVpaObservedContainersValue(pod *v1.Pod) string {
-	containerNames := make([]string, len(pod.Spec.Containers))
+	var containerNames []string
+
+	// Add regular containers
 	for i := range pod.Spec.Containers {
-		containerNames[i] = pod.Spec.Containers[i].Name
+		containerNames = append(containerNames, pod.Spec.Containers[i].Name)
 	}
+
+	// MM custom code
+	// Add istio-proxy init container if it exists
+	for i := range pod.Spec.InitContainers {
+		if pod.Spec.InitContainers[i].Name == "istio-proxy" {
+			containerNames = append(containerNames, pod.Spec.InitContainers[i].Name)
+		}
+	}
+	// MM End custom code
+
 	return strings.Join(containerNames, listSeparator)
 }
 

@@ -53,7 +53,9 @@ func (*defaultPriorityProcessor) GetUpdatePriority(pod *apiv1.Pod, vpa *vpa_type
 
 	hasObservedContainers, vpaContainerSet := parseVpaObservedContainers(pod)
 
-	for _, podContainer := range pod.Spec.Containers {
+	// MM custom code: Process both regular containers and init containers (for istio-proxy)
+	allContainers := append(pod.Spec.Containers, pod.Spec.InitContainers...)
+	for _, podContainer := range allContainers {
 		if hasObservedContainers && !vpaContainerSet.Has(podContainer.Name) {
 			klog.V(4).InfoS("Not listed in VPA observed containers label. Skipping container priority calculations", "label", annotations.VpaObservedContainersLabel, "observedContainers", pod.GetAnnotations()[annotations.VpaObservedContainersLabel], "containerName", podContainer.Name, "vpa", klog.KObj(vpa))
 			continue
@@ -86,6 +88,7 @@ func (*defaultPriorityProcessor) GetUpdatePriority(pod *apiv1.Pod, vpa *vpa_type
 			}
 		}
 	}
+	// MM End custom code
 	resourceDiff := 0.0
 	for resource, totalRecommended := range totalRecommendedPerResource {
 		totalRequest := math.Max(float64(totalRequestPerResource[resource]), 1.0)

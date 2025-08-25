@@ -64,10 +64,32 @@ func (c *resourcesUpdatesPatchCalculator) CalculatePatches(pod *core.Pod, vpa *v
 	}
 
 	updatesAnnotation := []string{}
+
+	// Process regular containers first
 	for i, containerResources := range containersResources {
-		newPatches, newUpdatesAnnotation := getContainerPatch(pod, i, annotationsPerContainer, containerResources)
-		result = append(result, newPatches...)
-		updatesAnnotation = append(updatesAnnotation, newUpdatesAnnotation)
+		// MM custom code
+		// Check if we have more resources than regular containers, meaning we have init containers too
+		if i >= len(pod.Spec.Containers) {
+			// This is an init container (specifically istio-proxy)
+			initContainerIndex := -1
+			for idx, initContainer := range pod.Spec.InitContainers {
+				if initContainer.Name == "istio-proxy" {
+					initContainerIndex = idx
+					break
+				}
+			}
+			if initContainerIndex >= 0 {
+				newPatches, newUpdatesAnnotation := getInitContainerPatch(pod, initContainerIndex, annotationsPerContainer, containerResources)
+				result = append(result, newPatches...)
+				updatesAnnotation = append(updatesAnnotation, newUpdatesAnnotation)
+			}
+		} else {
+			// Regular container
+			newPatches, newUpdatesAnnotation := getContainerPatch(pod, i, annotationsPerContainer, containerResources)
+			result = append(result, newPatches...)
+			updatesAnnotation = append(updatesAnnotation, newUpdatesAnnotation)
+		}
+		// MM End custom code
 	}
 
 	if len(updatesAnnotation) > 0 {
@@ -97,6 +119,29 @@ func getContainerPatch(pod *core.Pod, i int, annotationsPerContainer vpa_api_uti
 	return patches, updatesAnnotation
 }
 
+// MM custom code
+func getInitContainerPatch(pod *core.Pod, i int, annotationsPerContainer vpa_api_util.ContainerToAnnotationsMap, containerResources vpa_api_util.ContainerResources) ([]resource_admission.PatchRecord, string) {
+	var patches []resource_admission.PatchRecord
+	// Add empty resources object if missing.
+	requests, limits := resourcehelpers.InitContainerRequestsAndLimits(pod.Spec.InitContainers[i].Name, pod)
+	if limits == nil && requests == nil {
+		patches = append(patches, GetPatchInitializingEmptyInitContainerResources(i))
+	}
+
+	annotations, found := annotationsPerContainer[pod.Spec.InitContainers[i].Name]
+	if !found {
+		annotations = make([]string, 0)
+	}
+
+	patches, annotations = appendInitContainerPatchesAndAnnotations(patches, annotations, requests, i, containerResources.Requests, "requests", "request")
+	patches, annotations = appendInitContainerPatchesAndAnnotations(patches, annotations, limits, i, containerResources.Limits, "limits", "limit")
+
+	updatesAnnotation := fmt.Sprintf("initContainer %d: ", i) + strings.Join(annotations, ", ")
+	return patches, updatesAnnotation
+}
+
+// MM End custom code
+
 func appendPatchesAndAnnotations(patches []resource_admission.PatchRecord, annotations []string, current core.ResourceList, containerIndex int, resources core.ResourceList, fieldName, resourceName string) ([]resource_admission.PatchRecord, []string) {
 	// Add empty object if it's missing and we're about to fill it.
 	if current == nil && len(resources) > 0 {
@@ -108,3 +153,18 @@ func appendPatchesAndAnnotations(patches []resource_admission.PatchRecord, annot
 	}
 	return patches, annotations
 }
+
+// MM custom code
+func appendInitContainerPatchesAndAnnotations(patches []resource_admission.PatchRecord, annotations []string, current core.ResourceList, containerIndex int, resources core.ResourceList, fieldName, resourceName string) ([]resource_admission.PatchRecord, []string) {
+	// Add empty object if it's missing and we're about to fill it.
+	if current == nil && len(resources) > 0 {
+		patches = append(patches, GetPatchInitializingEmptyInitContainerResourcesSubfield(containerIndex, fieldName))
+	}
+	for resource, request := range resources {
+		patches = append(patches, GetAddInitContainerResourceRequirementValuePatch(containerIndex, fieldName, resource, request))
+		annotations = append(annotations, fmt.Sprintf("%s %s", resource, resourceName))
+	}
+	return patches, annotations
+}
+
+// MM End custom code

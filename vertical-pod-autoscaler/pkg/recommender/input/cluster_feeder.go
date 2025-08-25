@@ -493,6 +493,12 @@ func (feeder *clusterStateFeeder) LoadPods() {
 			podInitContainers := feeder.clusterState.Pods()[pod.ID].InitContainers
 			feeder.clusterState.Pods()[pod.ID].InitContainers = append(podInitContainers, initContainer.ID.ContainerName)
 
+			// MM custom code: Process istio-proxy init containers through aggregation system for checkpoint support
+			if initContainer.ID.ContainerName == "istio-proxy" {
+				if err = feeder.clusterState.AddOrUpdateContainer(initContainer.ID, initContainer.Request); err != nil {
+					klog.V(0).InfoS("Failed to add istio-proxy init container", "container", initContainer.ID, "error", err)
+				}
+			}
 		}
 	}
 }
@@ -508,11 +514,14 @@ func (feeder *clusterStateFeeder) LoadRealTimeMetrics(ctx context.Context) {
 	for _, containerMetrics := range containersMetrics {
 		// Container metrics are fetched for all pods, however, not all pod states are tracked in memory saver mode.
 		if pod, exists := feeder.clusterState.Pods()[containerMetrics.ID.PodID]; exists && pod != nil {
-			if slices.Contains(pod.InitContainers, containerMetrics.ID.ContainerName) {
+			// MM custom code
+			// Skip init containers except for istio-proxy which needs VPA recommendations
+			if slices.Contains(pod.InitContainers, containerMetrics.ID.ContainerName) && containerMetrics.ID.ContainerName != "istio-proxy" {
 				klog.V(3).InfoS("Skipping metric samples for init container", "pod", klog.KRef(containerMetrics.ID.Namespace, containerMetrics.ID.PodName), "container", containerMetrics.ID.ContainerName)
 				droppedSampleCount += len(containerMetrics.Usage)
 				continue
 			}
+			// MM End custom code
 		}
 		for _, sample := range newContainerUsageSamplesWithKey(containerMetrics) {
 			if err := feeder.clusterState.AddSample(sample); err != nil {
