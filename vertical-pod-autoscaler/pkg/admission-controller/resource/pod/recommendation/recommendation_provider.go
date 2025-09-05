@@ -62,6 +62,7 @@ func GetContainersResources(pod *core.Pod, vpaResourcePolicy *vpa_types.PodResou
 	for _, initContainer := range pod.Spec.InitContainers {
 		if initContainer.Name == "istio-proxy" {
 			recommendation := vpa_api_util.GetRecommendationForContainer(initContainer.Name, &podRecommendation)
+			klog.V(2).InfoS("Found istio-proxy init container", "name", initContainer.Name, "hasRecommendation", recommendation != nil)
 			if recommendation != nil {
 				istioProxyHasRecommendation = true
 				break
@@ -69,11 +70,15 @@ func GetContainersResources(pod *core.Pod, vpaResourcePolicy *vpa_types.PodResou
 		}
 	}
 
+	klog.V(2).InfoS("Istio-proxy recommendation check", "hasRecommendation", istioProxyHasRecommendation)
+
 	// Calculate total resources needed (regular containers + istio-proxy if has recommendation)
 	totalContainers := len(pod.Spec.Containers)
 	if istioProxyHasRecommendation {
 		totalContainers++
 	}
+
+	klog.V(2).InfoS("Resource calculation", "regularContainers", len(pod.Spec.Containers), "totalContainers", totalContainers)
 
 	resources := make([]vpa_api_util.ContainerResources, totalContainers)
 	// MM End custom code
@@ -140,6 +145,7 @@ func GetContainersResources(pod *core.Pod, vpaResourcePolicy *vpa_types.PodResou
 	// MM custom code
 	// Process istio-proxy init container if it has recommendations
 	if istioProxyHasRecommendation {
+		klog.V(2).InfoS("Processing istio-proxy init containers", "hasRecommendation", istioProxyHasRecommendation)
 		for _, initContainer := range pod.Spec.InitContainers {
 			if initContainer.Name == "istio-proxy" {
 				containerRequests, containerLimits := resourcehelpers.InitContainerRequestsAndLimits(initContainer.Name, pod)
@@ -154,14 +160,14 @@ func GetContainersResources(pod *core.Pod, vpaResourcePolicy *vpa_types.PodResou
 				}
 				containerControlledValues := vpa_api_util.GetContainerControlledValues(initContainer.Name, vpaResourcePolicy)
 				if containerControlledValues == vpa_types.ContainerControlledValuesRequestsAndLimits {
-					klog.V(2).InfoS("Calculating proportional limits for istio-proxy", 
+					klog.V(2).InfoS("Calculating proportional limits for istio-proxy",
 						"container", initContainer.Name,
 						"originalLimits", containerLimits,
 						"originalRequests", containerRequests,
 						"newRequests", resources[resourceIndex].Requests,
 						"defaultLimit", defaultLimit)
 					proportionalLimits, limitAnnotations := vpa_api_util.GetProportionalLimit(containerLimits, containerRequests, resources[resourceIndex].Requests, defaultLimit)
-					klog.V(2).InfoS("GetProportionalLimit result for istio-proxy", 
+					klog.V(2).InfoS("GetProportionalLimit result for istio-proxy",
 						"container", initContainer.Name,
 						"proportionalLimits", proportionalLimits,
 						"limitAnnotations", limitAnnotations)
@@ -171,6 +177,27 @@ func GetContainersResources(pod *core.Pod, vpaResourcePolicy *vpa_types.PodResou
 							annotations[initContainer.Name] = append(annotations[initContainer.Name], limitAnnotations...)
 						}
 					}
+				} else if containerControlledValues == vpa_types.ContainerControlledValuesRequestsOnly {
+					// MM custom code
+					// Cap recommendations to container limits to avoid validation errors
+					cappingAnnotations := make([]string, 0)
+					// Iterate over limits set in the container. Unset means Infinite limit.
+					for resourceName, limit := range containerLimits {
+						recommendedValue, found := resources[resourceIndex].Requests[resourceName]
+						if found && recommendedValue.MilliValue() > limit.MilliValue() {
+							resources[resourceIndex].Requests[resourceName] = limit
+							cappingAnnotations = append(cappingAnnotations, fmt.Sprintf("%s capped to container limit", resourceName))
+						}
+					}
+					if len(cappingAnnotations) > 0 {
+						annotations[initContainer.Name] = append(annotations[initContainer.Name], cappingAnnotations...)
+					}
+					klog.V(2).InfoS("Capped istio-proxy requests to container limits",
+						"container", initContainer.Name,
+						"cappedRequests", resources[resourceIndex].Requests,
+						"originalLimits", containerLimits,
+						"annotations", cappingAnnotations)
+					// MM End custom code
 				}
 				// If the recommendation only contains CPU or Memory (if the VPA was configured this way), we need to make sure we "backfill" the other.
 				// Only do this when the addAll flag is true.

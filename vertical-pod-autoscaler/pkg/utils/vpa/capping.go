@@ -543,12 +543,16 @@ func insertRequestsForMissingRecommendations(containerRecommendations []vpa_type
 	// Add missing recommendations for istio-proxy init container
 	for _, container := range pod.Spec.InitContainers {
 		if container.Name == "istio-proxy" && !recommendationForContainerExists(container.Name, containerRecommendations) {
-			requests, _ := resourcehelpers.ContainerRequestsAndLimits(container.Name, pod)
+			fmt.Printf("DEBUG CAPPING: Found istio-proxy init container without recommendation, adding one\n")
+			requests, _ := resourcehelpers.InitContainerRequestsAndLimits(container.Name, pod)
 			if len(requests) > 0 {
+				fmt.Printf("DEBUG CAPPING: Adding recommendation for istio-proxy with requests: %v\n", requests)
 				result = append(result, vpa_types.RecommendedContainerResources{
 					ContainerName: container.Name,
 					Target:        requests,
 				})
+			} else {
+				fmt.Printf("DEBUG CAPPING: No requests found for istio-proxy init container\n")
 			}
 		}
 	}

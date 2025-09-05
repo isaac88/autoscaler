@@ -19,6 +19,7 @@ package recommendation
 import (
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -110,6 +111,42 @@ func TestUpdateResourceRequests(t *testing.T) {
 	vpaWithEmptyRecommendation.Status.Recommendation = &vpa_types.RecommendedPodResources{}
 	vpaWithNilRecommendation := vpaBuilder.Get()
 	vpaWithNilRecommendation.Status.Recommendation = nil
+
+	// Istio-proxy init container test setup
+	istioProxyInitContainer := test.Container().WithName("istio-proxy").
+		WithCPURequest(resource.MustParse("100m")).WithCPULimit(resource.MustParse("500m")).
+		WithMemRequest(resource.MustParse("128Mi")).WithMemLimit(resource.MustParse("256Mi")).Get()
+	istioProxyPod := test.Pod().WithName("test_istio_proxy").
+		AddContainer(test.Container().WithName(containerName).WithCPURequest(resource.MustParse("1")).WithMemRequest(resource.MustParse("100Mi")).Get()).
+		AddInitContainer(istioProxyInitContainer).WithLabels(labels).Get()
+
+	// VPA that recommends more than the limit for istio-proxy with RequestsOnly mode
+	istioProxyVPAHighTarget := test.VerticalPodAutoscaler().
+		WithName(vpaName).
+		WithContainer(containerName).WithTarget("2", "200Mi").
+		WithContainer("istio-proxy").WithTarget("536m", "300Mi"). // CPU target > limit (500m)
+		WithControlledValues("istio-proxy", vpa_types.ContainerControlledValuesRequestsOnly).
+		Get()
+
+	// Explicitly set the recommendation status for the istio-proxy VPA
+	istioProxyVPAHighTarget.Status.Recommendation = &vpa_types.RecommendedPodResources{
+		ContainerRecommendations: []vpa_types.RecommendedContainerResources{
+			{
+				ContainerName: containerName,
+				Target: apiv1.ResourceList{
+					apiv1.ResourceCPU:    resource.MustParse("2"),
+					apiv1.ResourceMemory: resource.MustParse("200Mi"),
+				},
+			},
+			{
+				ContainerName: "istio-proxy",
+				Target: apiv1.ResourceList{
+					apiv1.ResourceCPU:    resource.MustParse("536m"),  // > 500m limit
+					apiv1.ResourceMemory: resource.MustParse("300Mi"), // > 256Mi limit
+				},
+			},
+		},
+	}
 
 	testCases := []struct {
 		name              string
@@ -290,6 +327,20 @@ func TestUpdateResourceRequests(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:           "istio-proxy init container - requests capped at limit",
+			pod:            istioProxyPod,
+			vpa:            istioProxyVPAHighTarget,
+			expectedAction: true,
+			expectedCPU:    resource.MustParse("2"),     // Regular container
+			expectedMem:    resource.MustParse("200Mi"), // Regular container
+			annotations: vpa_api_util.ContainerToAnnotationsMap{
+				"istio-proxy": []string{
+					"cpu capped to container limit",
+					"memory capped to container limit",
+				},
+			},
+		},
 	}
 
 	for _, tc := range testCases {
@@ -306,35 +357,68 @@ func TestUpdateResourceRequests(t *testing.T) {
 
 			if tc.expectedAction {
 				assert.Nil(t, err)
-				if !assert.Equal(t, len(resources), 1) {
-					return
+
+				// Special handling for istio-proxy test case which has multiple containers
+				if strings.Contains(tc.name, "istio-proxy") {
+					if !assert.Equal(t, 2, len(resources), "Expected 2 resources for istio-proxy test case") {
+						return
+					}
+
+					// Check regular container (index 0)
+					cpuRequest := resources[0].Requests[apiv1.ResourceCPU]
+					assert.Equal(t, tc.expectedCPU.Value(), cpuRequest.Value(), "cpu request doesn't match")
+
+					memoryRequest := resources[0].Requests[apiv1.ResourceMemory]
+					assert.Equal(t, tc.expectedMem.Value(), memoryRequest.Value(), "memory request doesn't match")
+
+					// Check istio-proxy init container (index 1) - verify requests are capped to limits
+					istioProxyCPURequest := resources[1].Requests[apiv1.ResourceCPU]
+					expectedCPU := resource.MustParse("500m")
+					assert.Equal(t, expectedCPU.Value(), istioProxyCPURequest.Value(), "istio-proxy cpu request should be capped to limit")
+
+					istioProxyMemRequest := resources[1].Requests[apiv1.ResourceMemory]
+					expectedMem := resource.MustParse("256Mi")
+					assert.Equal(t, expectedMem.Value(), istioProxyMemRequest.Value(), "istio-proxy memory request should be capped to limit")
+
+					// Check that annotations are generated showing capping occurred
+					if istioAnnotations, exists := annotations["istio-proxy"]; exists {
+						assert.Contains(t, istioAnnotations, "cpu capped to container limit", "Should have cpu capping annotation")
+						assert.Contains(t, istioAnnotations, "memory capped to container limit", "Should have memory capping annotation")
+					} else {
+						t.Error("Expected istio-proxy annotations to be present")
+					}
+
+				} else {
+					if !assert.Equal(t, 1, len(resources), "Expected 1 resource for regular test case") {
+						return
+					}
+
+					cpuRequest := resources[0].Requests[apiv1.ResourceCPU]
+					assert.Equal(t, tc.expectedCPU.Value(), cpuRequest.Value(), "cpu request doesn't match")
+
+					memoryRequest := resources[0].Requests[apiv1.ResourceMemory]
+					assert.Equal(t, tc.expectedMem.Value(), memoryRequest.Value(), "memory request doesn't match")
+
+					cpuLimit, cpuLimitPresent := resources[0].Limits[apiv1.ResourceCPU]
+					if tc.expectedCPULimit == nil {
+						assert.False(t, cpuLimitPresent, "expected no cpu limit, got %s", cpuLimit.String())
+					} else {
+						if assert.True(t, cpuLimitPresent, "expected cpu limit, but it's missing") {
+							assert.Equal(t, tc.expectedCPULimit.MilliValue(), cpuLimit.MilliValue(), "cpu limit doesn't match")
+						}
+					}
+
+					memLimit, memLimitPresent := resources[0].Limits[apiv1.ResourceMemory]
+					if tc.expectedMemLimit == nil {
+						assert.False(t, memLimitPresent, "expected no memory limit, got %s", memLimit.String())
+					} else {
+						if assert.True(t, memLimitPresent, "expected memory limit, but it's missing") {
+							assert.Equal(t, tc.expectedMemLimit.MilliValue(), memLimit.MilliValue(), "memory limit doesn't match")
+						}
+					}
 				}
 
 				assert.NotContains(t, resources, "", "expected empty resource to be removed")
-
-				cpuRequest := resources[0].Requests[apiv1.ResourceCPU]
-				assert.Equal(t, tc.expectedCPU.Value(), cpuRequest.Value(), "cpu request doesn't match")
-
-				memoryRequest := resources[0].Requests[apiv1.ResourceMemory]
-				assert.Equal(t, tc.expectedMem.Value(), memoryRequest.Value(), "memory request doesn't match")
-
-				cpuLimit, cpuLimitPresent := resources[0].Limits[apiv1.ResourceCPU]
-				if tc.expectedCPULimit == nil {
-					assert.False(t, cpuLimitPresent, "expected no cpu limit, got %s", cpuLimit.String())
-				} else {
-					if assert.True(t, cpuLimitPresent, "expected cpu limit, but it's missing") {
-						assert.Equal(t, tc.expectedCPULimit.MilliValue(), cpuLimit.MilliValue(), "cpu limit doesn't match")
-					}
-				}
-
-				memLimit, memLimitPresent := resources[0].Limits[apiv1.ResourceMemory]
-				if tc.expectedMemLimit == nil {
-					assert.False(t, memLimitPresent, "expected no memory limit, got %s", memLimit.String())
-				} else {
-					if assert.True(t, memLimitPresent, "expected memory limit, but it's missing") {
-						assert.Equal(t, tc.expectedMemLimit.MilliValue(), memLimit.MilliValue(), "memory limit doesn't match")
-					}
-				}
 
 				assert.Len(t, annotations, len(tc.annotations))
 				if len(tc.annotations) > 0 {
